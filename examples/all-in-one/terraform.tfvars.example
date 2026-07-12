@@ -1,0 +1,18 @@
+region      = "us-east-1"
+name_prefix = "nullafi-shield"
+
+host_name           = "shield.example.com"
+route53_zone_id     = "Z0000000000000EXAMPLE"
+acme_challenge_type = "DNS-01"
+
+nullafi_license_key = "PASTE-YOUR-LICENSE-KEY"
+
+proxy_mitm_cert = "./nullafi.crt"
+proxy_mitm_key  = "./nullafi.key"
+
+key_name          = "my-ec2-keypair"
+allowed_ssh_cidrs = ["203.0.113.4/32"]
+
+tags = {
+  Environment = "eval"
+}

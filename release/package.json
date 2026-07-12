@@ -1,0 +1,21 @@
+{
+  "name": "terraform-aws-nullafi-shield-all-in-one",
+  "version": "0.0.0-development",
+  "private": true,
+  "description": "Terraform module: Nullafi Shield all-in-one AWS deployment",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nullafi/terraform-aws-nullafi-shield-all-in-one.git"
+  },
+  "release": {
+    "branches": [
+      "main"
+    ]
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^12.0.6",
+    "semantic-release": "^25.0.3"
+  }
+}
