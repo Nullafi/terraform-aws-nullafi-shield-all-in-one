@@ -42,7 +42,7 @@ output "shield_web_ui_url" {
 ```
 
 This module intentionally does **not** configure an AWS provider or a backend — that's the
-calling root config's responsibility (as shown above). See [examples/all-in-one](examples/all-in-one)
+calling root config's responsibility (as shown above). See [usage/all-in-one](usage/all-in-one)
 for a complete, runnable root config.
 
 ### Requirements
