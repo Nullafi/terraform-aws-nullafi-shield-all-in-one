@@ -50,6 +50,27 @@ LICENSE_KEY=$(get_secret "${license_key_secret_arn}")
 ELASTIC_PASSWORD=$(openssl rand -hex 24)
 get_secret "${acme_dns01_env_secret_arn}" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /opt/nullafi/acme-dns01.env
 
+# ---------- Log in to private ECR registries ----------
+%{ if length(ecr_registries) > 0 ~}
+# Retries cover IAM propagation of the freshly created instance role. Tokens last 12 h; containers
+# restart from the local image cache, so only a new pull needs a fresh login.
+ecr_login() {
+  local registry="$1" region
+  region=$(cut -d. -f4 <<<"$registry")
+  for attempt in $(seq 1 30); do
+    if aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry"; then
+      return 0
+    fi
+    echo "ECR login to $registry failed (attempt $attempt/30), retrying in 10s" >&2
+    sleep 10
+  done
+  return 1
+}
+%{ for registry in ecr_registries ~}
+ecr_login "${registry}"
+%{ endfor ~}
+%{ endif ~}
+
 # ---------- Write .env ----------
 cat > .env <<'ENVEOF'
 HOST_NAME=${host_name}

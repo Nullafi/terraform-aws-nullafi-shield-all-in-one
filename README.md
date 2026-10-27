@@ -67,6 +67,32 @@ for a complete, runnable root config.
 - **A public DNS hostname** you control (e.g. `shield.yourcompany.com`) if you want HTTPS
 - **(Optional) An EC2 key pair** if you want SSH access to the instance
 
+### Private ECR images
+
+Public images need nothing extra. To run images from private ECR repositories, list them in
+`ecr_pull_repository_arns`. The instance role then gets `ecr:GetAuthorizationToken` and pull access to
+those repositories only, and the instance runs `docker login` for each registry at boot with its
+role's temporary credentials. No access keys are involved.
+
+For a repository in **another account**, its owner must also allow this account's instance role in the
+repository policy (IAM in both accounts must allow a cross-account pull):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "ShieldHostsPull",
+    "Effect": "Allow",
+    "Principal": { "AWS": "arn:aws:iam::<shield-account-id>:root" },
+    "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+    "Condition": { "ArnLike": { "aws:PrincipalArn": "arn:aws:iam::<shield-account-id>:role/*-ec2" } }
+  }]
+}
+```
+
+Registry tokens last 12 hours. Containers restart from the local image cache, so this only matters for a
+manual `docker compose pull` on the host, which needs a new `docker login` first.
+
 ### Secrets
 
 You pass the license key, the proxy CA certificate and private key, and any DNS-01 credentials as
@@ -149,6 +175,7 @@ If you don't set `route53_zone_id`, you must create the DNS A record yourself, p
 | `squid_image` | no | `public.ecr.aws/nullafi/proxy:6.10.12` | Squid proxy container image |
 | `activity_image` | no | `docker.elastic.co/elasticsearch/elasticsearch:8.7.0` | Elasticsearch container image |
 | `redis_image` | no | `public.ecr.aws/docker/library/redis:7.4.12-alpine` | Redis container image |
+| `ecr_pull_repository_arns` | no | `[]` | Private ECR repository ARNs the instance may pull from (see Private ECR images) |
 | `proxy_port` | no | `44509` | External port for Squid |
 | `tags` | no | `{}` | Tags applied to all resources |
 
@@ -205,7 +232,8 @@ Security group changes (`allowed_web_cidrs`, `allowed_proxy_cidrs`, `allowed_ssh
 > `proxy_mitm_key` (file paths) are replaced by `proxy_ca_cert` and `proxy_ca_key` (PEM content).
 > `elastic_password` is removed. `nullafi_license_key`, `proxy_ca_*` and `acme_dns01_env` are now
 > ephemeral, so root variables passing them must be declared `ephemeral = true`. The first apply
-> creates the secrets and replaces the instance.
+> creates the secrets and replaces the instance. The instance role no longer has the managed
+> `AmazonEC2ContainerRegistryReadOnly` policy; set `ecr_pull_repository_arns` to pull private images.
 
 ### Tearing down
 
@@ -216,6 +244,9 @@ deleted manually.
 
 ### Troubleshooting
 
+- **Boot stops at "ECR login … failed"** or containers fail with `pull access denied` — the repository is
+  missing from `ecr_pull_repository_arns`, or a cross-account repository policy doesn't allow this account's
+  `<name_prefix>-ec2` role.
 - **Shield Web UI won't load** — check DNS (`dig +short <host_name>` should return the EIP), SSH
   in and check `sudo docker ps` (all containers should be `Up`), and `sudo docker logs shield-web-ui | tail -50`.
 - **Let's Encrypt certificate never issues** — for `HTTP-01`/`TLS-ALPN-01`, DNS must point to the

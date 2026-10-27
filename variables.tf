@@ -70,6 +70,17 @@ variable "redis_image" {
   default     = "public.ecr.aws/docker/library/redis:7.4.12-alpine"
 }
 
+variable "ecr_pull_repository_arns" {
+  description = "Private ECR repository ARNs the instance may pull from. The instance logs in to each repository's registry at boot. Cross-account repositories also need a repository policy allowing this account's <name_prefix>-ec2 role. Leave empty for public images only."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for arn in var.ecr_pull_repository_arns : can(regex("^arn:aws:ecr:[a-z0-9-]+:[0-9]{12}:repository/[a-z0-9][a-z0-9._/-]*$", arn))])
+    error_message = "ecr_pull_repository_arns entries must be ECR repository ARNs, e.g. arn:aws:ecr:us-east-1:123456789012:repository/my-repo."
+  }
+}
+
 # ------------------------------------------------------------------------------
 # Secrets and certificates
 # ------------------------------------------------------------------------------

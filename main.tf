@@ -30,6 +30,10 @@ locals {
 
   docker_compose_version = "v5.6.1"
   docker_compose_sha256  = "47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0"
+
+  ecr_registries = distinct([
+    for arn in var.ecr_pull_repository_arns : "${split(":", arn)[4]}.dkr.ecr.${split(":", arn)[3]}.amazonaws.com"
+  ])
 }
 
 # ------------------------------------------------------------------------------
@@ -206,9 +210,28 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
-resource "aws_iam_role_policy_attachment" "ecr_readonly" {
-  role       = aws_iam_role.instance.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+resource "aws_iam_role_policy" "ecr_pull" {
+  count = length(var.ecr_pull_repository_arns) > 0 ? 1 : 0
+  name  = "pull-shield-images"
+  role  = aws_iam_role.instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EcrLogin"
+        Effect   = "Allow"
+        Action   = ["ecr:GetAuthorizationToken"]
+        Resource = "*"
+      },
+      {
+        Sid      = "PullListedRepositories"
+        Effect   = "Allow"
+        Action   = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+        Resource = var.ecr_pull_repository_arns
+      }
+    ]
+  })
 }
 
 resource "aws_iam_role_policy" "route53" {
@@ -332,6 +355,7 @@ resource "aws_instance" "main" {
     activity_image            = var.activity_image
     redis_image               = var.redis_image
     proxy_port                = var.proxy_port
+    ecr_registries            = local.ecr_registries
     license_key_secret_arn    = aws_secretsmanager_secret.license_key.arn
     proxy_ca_secret_arn       = aws_secretsmanager_secret.proxy_ca.arn
     acme_dns01_env_secret_arn = aws_secretsmanager_secret.acme_dns01_env.arn
@@ -352,6 +376,7 @@ resource "aws_instance" "main" {
   depends_on = [
     aws_iam_role_policy.secrets,
     aws_iam_role_policy.secrets_kms,
+    aws_iam_role_policy.ecr_pull,
     aws_secretsmanager_secret_version.license_key,
     aws_secretsmanager_secret_version.proxy_ca,
     aws_secretsmanager_secret_version.acme_dns01_env,
