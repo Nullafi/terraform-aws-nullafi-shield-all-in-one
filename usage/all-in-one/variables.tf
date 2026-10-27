@@ -28,23 +28,38 @@ variable "acme_challenge_type" {
 }
 
 variable "nullafi_license_key" {
-  description = "Nullafi license key string."
+  description = "Nullafi license key. Prefer setting it with the TF_VAR_nullafi_license_key environment variable."
   type        = string
-  default     = null
+  ephemeral   = true
   sensitive   = true
 }
 
-variable "proxy_mitm_cert" {
-  description = "Path to the Squid MITM certificate file."
+variable "proxy_ca_cert_file" {
+  description = "Path to the Squid MITM CA certificate (PEM)."
   type        = string
-  default     = null
 }
 
-variable "proxy_mitm_key" {
-  description = "Path to the Squid MITM private key file."
+variable "proxy_ca_key_file" {
+  description = "Path to the Squid MITM CA private key (PEM)."
   type        = string
-  default     = null
-  sensitive   = true
+}
+
+variable "secrets_version" {
+  description = "Increment after changing the license key or CA files to push the new values."
+  type        = number
+  default     = 1
+}
+
+variable "allowed_web_cidrs" {
+  description = "IPv4 CIDR blocks allowed to reach the Shield Web UI on ports 80 and 443."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "allowed_proxy_cidrs" {
+  description = "IPv4 CIDR blocks allowed to use the Squid proxy."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
 }
 
 variable "key_name" {

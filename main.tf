@@ -28,11 +28,62 @@ locals {
   az        = data.aws_availability_zones.available.names[0]
   host_name = var.host_name != null ? var.host_name : aws_eip.main.public_ip
 
-  has_mitm_cert = var.proxy_mitm_cert != null && var.proxy_mitm_key != null
-  mitm_cert     = local.has_mitm_cert ? file(var.proxy_mitm_cert) : ""
-  mitm_key      = local.has_mitm_cert ? file(nonsensitive(var.proxy_mitm_key)) : ""
+  docker_compose_version = "v5.6.1"
+  docker_compose_sha256  = "47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0"
+}
 
-  has_license_key = var.nullafi_license_key != null
+# ------------------------------------------------------------------------------
+# Secrets Manager – license key, proxy CA and DNS-01 credentials
+# ------------------------------------------------------------------------------
+
+resource "aws_secretsmanager_secret" "license_key" {
+  name_prefix             = "${var.name_prefix}/license-key-"
+  description             = "Nullafi Shield license key"
+  kms_key_id              = var.secrets_kms_key_arn
+  recovery_window_in_days = var.secrets_recovery_window_in_days
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "license_key" {
+  secret_id                = aws_secretsmanager_secret.license_key.id
+  secret_string_wo         = var.nullafi_license_key
+  secret_string_wo_version = var.secrets_version
+}
+
+resource "aws_secretsmanager_secret" "proxy_ca" {
+  name_prefix             = "${var.name_prefix}/proxy-ca-"
+  description             = "Nullafi Shield Squid MITM CA certificate and private key"
+  kms_key_id              = var.secrets_kms_key_arn
+  recovery_window_in_days = var.secrets_recovery_window_in_days
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "proxy_ca" {
+  secret_id                = aws_secretsmanager_secret.proxy_ca.id
+  secret_string_wo         = jsonencode({ cert = var.proxy_ca_cert, key = var.proxy_ca_key })
+  secret_string_wo_version = var.secrets_version
+}
+
+resource "aws_secretsmanager_secret" "acme_dns01_env" {
+  name_prefix             = "${var.name_prefix}/acme-dns01-env-"
+  description             = "Nullafi Shield DNS-01 provider credentials"
+  kms_key_id              = var.secrets_kms_key_arn
+  recovery_window_in_days = var.secrets_recovery_window_in_days
+  tags                    = var.tags
+}
+
+resource "aws_secretsmanager_secret_version" "acme_dns01_env" {
+  secret_id                = aws_secretsmanager_secret.acme_dns01_env.id
+  secret_string_wo         = jsonencode(var.acme_dns01_env)
+  secret_string_wo_version = var.secrets_version
+}
+
+locals {
+  secret_arns = [
+    aws_secretsmanager_secret.license_key.arn,
+    aws_secretsmanager_secret.proxy_ca.arn,
+    aws_secretsmanager_secret.acme_dns01_env.arn,
+  ]
 }
 
 # ------------------------------------------------------------------------------
@@ -91,7 +142,7 @@ resource "aws_security_group" "instance" {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.allowed_web_cidrs
   }
 
   ingress {
@@ -99,7 +150,7 @@ resource "aws_security_group" "instance" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.allowed_web_cidrs
   }
 
   ingress {
@@ -107,7 +158,7 @@ resource "aws_security_group" "instance" {
     from_port   = var.proxy_port
     to_port     = var.proxy_port
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.allowed_proxy_cidrs
   }
 
   dynamic "ingress" {
@@ -182,6 +233,40 @@ resource "aws_iam_role_policy" "route53" {
   })
 }
 
+resource "aws_iam_role_policy" "secrets" {
+  name = "read-shield-secrets"
+  role = aws_iam_role.instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = local.secret_arns
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "secrets_kms" {
+  count = var.secrets_kms_key_arn != null ? 1 : 0
+  name  = "decrypt-shield-secrets"
+  role  = aws_iam_role.instance.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["kms:Decrypt"]
+      Resource = var.secrets_kms_key_arn
+      Condition = {
+        StringEquals = {
+          "kms:ViaService" = "secretsmanager.${var.region}.amazonaws.com"
+        }
+      }
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "instance" {
   name = "${var.name_prefix}-ec2"
   role = aws_iam_role.instance.name
@@ -239,30 +324,40 @@ resource "aws_instance" "main" {
   }
 
   user_data_base64 = base64encode(templatefile("${path.module}/user_data.sh.tftpl", {
-    host_name           = local.host_name
-    shield_image        = var.shield_image
-    squid_image         = var.squid_image
-    activity_image      = var.activity_image
-    redis_image         = var.redis_image
-    elastic_password    = var.elastic_password
-    proxy_port          = var.proxy_port
-    license_key         = var.nullafi_license_key != null ? nonsensitive(var.nullafi_license_key) : ""
-    has_license_key     = local.has_license_key
-    has_mitm_cert       = local.has_mitm_cert
-    mitm_cert           = local.mitm_cert
-    mitm_key            = local.has_mitm_cert ? nonsensitive(local.mitm_key) : ""
-    has_domain          = var.host_name != null
-    acme_challenge_type = var.acme_challenge_type
-    acme_dns01_provider = var.acme_dns01_provider
-    acme_dns01_env      = var.acme_dns01_env
-    route53_zone_id     = var.route53_zone_id
-    region              = var.region
-    dns_wait_iterations = var.dns_wait_timeout / 10
+    host_name                 = local.host_name
+    docker_compose_version    = local.docker_compose_version
+    docker_compose_sha256     = local.docker_compose_sha256
+    shield_image              = var.shield_image
+    squid_image               = var.squid_image
+    activity_image            = var.activity_image
+    redis_image               = var.redis_image
+    proxy_port                = var.proxy_port
+    license_key_secret_arn    = aws_secretsmanager_secret.license_key.arn
+    proxy_ca_secret_arn       = aws_secretsmanager_secret.proxy_ca.arn
+    acme_dns01_env_secret_arn = aws_secretsmanager_secret.acme_dns01_env.arn
+    secrets_version           = var.secrets_version
+    has_domain                = var.host_name != null
+    acme_challenge_type       = var.acme_challenge_type
+    acme_dns01_provider       = var.acme_dns01_provider
+    route53_zone_id           = var.route53_zone_id
+    region                    = var.region
+    dns_wait_iterations       = var.dns_wait_timeout / 10
   }))
+
+  # Image or config changes must reach the host; replacing it keeps the Elastic IP.
+  user_data_replace_on_change = true
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-all-in-one" })
 
+  depends_on = [
+    aws_iam_role_policy.secrets,
+    aws_iam_role_policy.secrets_kms,
+    aws_secretsmanager_secret_version.license_key,
+    aws_secretsmanager_secret_version.proxy_ca,
+    aws_secretsmanager_secret_version.acme_dns01_env,
+  ]
+
   lifecycle {
-    ignore_changes = [ami, user_data_base64]
+    ignore_changes = [ami]
   }
 }

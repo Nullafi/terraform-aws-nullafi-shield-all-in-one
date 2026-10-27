@@ -3,12 +3,12 @@
 # ------------------------------------------------------------------------------
 
 terraform {
-  required_version = ">= 1.9"
+  required_version = ">= 1.11"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 4.0"
+      version = ">= 6.0"
     }
   }
 
@@ -36,8 +36,11 @@ module "shield" {
   route53_zone_id     = var.route53_zone_id
   acme_challenge_type = var.acme_challenge_type
   nullafi_license_key = var.nullafi_license_key
-  proxy_mitm_cert     = var.proxy_mitm_cert
-  proxy_mitm_key      = var.proxy_mitm_key
+  proxy_ca_cert       = file(var.proxy_ca_cert_file)
+  proxy_ca_key        = file(var.proxy_ca_key_file)
+  secrets_version     = var.secrets_version
+  allowed_web_cidrs   = var.allowed_web_cidrs
+  allowed_proxy_cidrs = var.allowed_proxy_cidrs
   key_name            = var.key_name
   allowed_ssh_cidrs   = var.allowed_ssh_cidrs
   tags                = var.tags

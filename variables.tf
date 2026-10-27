@@ -8,9 +8,14 @@ variable "region" {
 }
 
 variable "name_prefix" {
-  description = "Prefix for resource names."
+  description = "Prefix for resource names. Lowercase letters, digits and hyphens; must start with a letter and not end with a hyphen."
   type        = string
   default     = "nullafi"
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,38}[a-z0-9]$", var.name_prefix))
+    error_message = "name_prefix must be 2-40 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
 }
 
 variable "instance_type" {
@@ -50,7 +55,7 @@ variable "shield_image" {
 variable "squid_image" {
   description = "Squid proxy container image."
   type        = string
-  default     = "public.ecr.aws/nullafi/proxy:latest"
+  default     = "public.ecr.aws/nullafi/proxy:6.10.12"
 }
 
 variable "activity_image" {
@@ -62,38 +67,75 @@ variable "activity_image" {
 variable "redis_image" {
   description = "Redis container image."
   type        = string
-  default     = "public.ecr.aws/docker/library/redis:6.2-alpine"
+  default     = "public.ecr.aws/docker/library/redis:7.4.12-alpine"
 }
 
 # ------------------------------------------------------------------------------
 # Secrets and certificates
 # ------------------------------------------------------------------------------
 
+# The values below are ephemeral and written to Secrets Manager as write-only
+# arguments, so they never appear in plans or state. The instance reads them at boot.
+
 variable "nullafi_license_key" {
-  description = "Nullafi license key string."
+  description = "Nullafi license key."
   type        = string
-  default     = null
+  ephemeral   = true
   sensitive   = true
 }
 
-variable "proxy_mitm_cert" {
-  description = "Path to Squid MITM certificate file."
+variable "proxy_ca_cert" {
+  description = "Squid MITM CA certificate, PEM content (not a file path)."
+  type        = string
+  ephemeral   = true
+
+  validation {
+    condition     = can(regex("-----BEGIN CERTIFICATE-----", var.proxy_ca_cert))
+    error_message = "proxy_ca_cert must be PEM content starting with -----BEGIN CERTIFICATE-----, not a file path."
+  }
+}
+
+variable "proxy_ca_key" {
+  description = "Squid MITM CA private key, PEM content (not a file path)."
+  type        = string
+  ephemeral   = true
+  sensitive   = true
+
+  validation {
+    condition     = can(regex("-----BEGIN [A-Z ]*PRIVATE KEY-----", var.proxy_ca_key))
+    error_message = "proxy_ca_key must be PEM content containing a PRIVATE KEY block, not a file path."
+  }
+}
+
+variable "acme_dns01_env" {
+  description = "Environment variables for DNS-01 provider credentials (e.g. CF_API_TOKEN for Cloudflare). Not needed for route53, which uses the instance role."
+  type        = map(string)
+  default     = {}
+  ephemeral   = true
+  sensitive   = true
+}
+
+variable "secrets_version" {
+  description = "Increment to push new values of nullafi_license_key, proxy_ca_cert, proxy_ca_key or acme_dns01_env. Terraform cannot detect changes to write-only values, so the new values are only stored, and the instance replaced to read them, when this number changes."
+  type        = number
+  default     = 1
+}
+
+variable "secrets_kms_key_arn" {
+  description = "Customer-managed KMS key ARN used to encrypt the Shield secrets. Uses the AWS-managed aws/secretsmanager key when null."
   type        = string
   default     = null
 }
 
-variable "proxy_mitm_key" {
-  description = "Path to Squid MITM private key file."
-  type        = string
-  default     = null
-  sensitive   = true
-}
+variable "secrets_recovery_window_in_days" {
+  description = "Days Secrets Manager keeps the Shield secrets after destroy before deleting them (0 deletes immediately, otherwise 7-30)."
+  type        = number
+  default     = 7
 
-variable "elastic_password" {
-  description = "Password for Elasticsearch."
-  type        = string
-  default     = "elastic"
-  sensitive   = true
+  validation {
+    condition     = var.secrets_recovery_window_in_days == 0 || (var.secrets_recovery_window_in_days >= 7 && var.secrets_recovery_window_in_days <= 30)
+    error_message = "secrets_recovery_window_in_days must be 0 or between 7 and 30."
+  }
 }
 
 variable "proxy_port" {
@@ -119,13 +161,6 @@ variable "acme_dns01_provider" {
   default     = null
 }
 
-variable "acme_dns01_env" {
-  description = "Environment variables for DNS-01 provider credentials. Keys and values depend on the provider (e.g. CF_API_TOKEN for Cloudflare, AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY for Route53)."
-  type        = map(string)
-  default     = {}
-  sensitive   = true
-}
-
 variable "route53_zone_id" {
   description = "Route53 hosted zone ID. When set, Terraform auto-creates the A record and grants the EC2 instance Route53 permissions for DNS-01 challenges."
   type        = string
@@ -136,6 +171,38 @@ variable "dns_wait_timeout" {
   description = "Seconds to wait for DNS to resolve to the EIP before starting containers. Only applies when host_name is set."
   type        = number
   default     = 900
+}
+
+variable "allowed_web_cidrs" {
+  description = "IPv4 CIDR blocks allowed to reach the Shield Web UI on ports 80 and 443. Restricting them blocks Let's Encrypt HTTP-01 and TLS-ALPN-01 validation, so use DNS-01."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = length(var.allowed_web_cidrs) >= 1 && length(var.allowed_web_cidrs) <= 15
+    error_message = "allowed_web_cidrs must contain between 1 and 15 entries."
+  }
+
+  validation {
+    condition     = alltrue([for c in var.allowed_web_cidrs : can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$", c)) && try(cidrsubnet(c, 0, 0) == c, false)])
+    error_message = "allowed_web_cidrs entries must be IPv4 CIDRs in canonical form, e.g. 203.0.113.0/24."
+  }
+}
+
+variable "allowed_proxy_cidrs" {
+  description = "IPv4 CIDR blocks allowed to use the Squid proxy on proxy_port."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+
+  validation {
+    condition     = length(var.allowed_proxy_cidrs) >= 1 && length(var.allowed_proxy_cidrs) <= 15
+    error_message = "allowed_proxy_cidrs must contain between 1 and 15 entries."
+  }
+
+  validation {
+    condition     = alltrue([for c in var.allowed_proxy_cidrs : can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$", c)) && try(cidrsubnet(c, 0, 0) == c, false)])
+    error_message = "allowed_proxy_cidrs entries must be IPv4 CIDRs in canonical form, e.g. 203.0.113.0/24."
+  }
 }
 
 variable "allowed_ssh_cidrs" {

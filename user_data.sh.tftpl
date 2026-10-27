@@ -6,19 +6,49 @@ sysctl -w vm.max_map_count=262144
 echo "vm.max_map_count=262144" >> /etc/sysctl.conf
 
 # ---------- Install Docker ----------
-dnf install -y docker
+dnf install -y docker jq
 systemctl enable docker
 systemctl start docker
 
-# Install docker-compose plugin
+# Install docker-compose plugin (pinned version, verified against its SHA-256)
 mkdir -p /usr/local/lib/docker/cli-plugins
-curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" \
-  -o /usr/local/lib/docker/cli-plugins/docker-compose
-chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+curl -fsSL "https://github.com/docker/compose/releases/download/${docker_compose_version}/docker-compose-linux-x86_64" \
+  -o /tmp/docker-compose
+echo "${docker_compose_sha256}  /tmp/docker-compose" | sha256sum -c -
+install -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+rm -f /tmp/docker-compose
 
 # ---------- Create app directory ----------
 mkdir -p /opt/nullafi
 cd /opt/nullafi
+umask 077
+
+# ---------- Read secrets from Secrets Manager ----------
+# secrets_version=${secrets_version} (bumping it replaces the instance so new values are read)
+# Retries cover IAM propagation of the freshly created instance role.
+get_secret() {
+  local arn="$1" region
+  region=$(cut -d: -f4 <<<"$arn")
+  for attempt in $(seq 1 30); do
+    if aws secretsmanager get-secret-value --region "$region" --secret-id "$arn" --query SecretString --output text; then
+      return 0
+    fi
+    echo "Secret not readable yet (attempt $attempt/30), retrying in 10s" >&2
+    sleep 10
+  done
+  return 1
+}
+
+PROXY_CA_JSON=$(get_secret "${proxy_ca_secret_arn}")
+jq -er '.cert' <<<"$PROXY_CA_JSON" > /opt/nullafi/mitm.crt
+jq -er '.key' <<<"$PROXY_CA_JSON" > /opt/nullafi/mitm.key
+unset PROXY_CA_JSON
+chmod 644 /opt/nullafi/mitm.crt
+chmod 600 /opt/nullafi/mitm.key
+
+LICENSE_KEY=$(get_secret "${license_key_secret_arn}")
+ELASTIC_PASSWORD=$(openssl rand -hex 24)
+get_secret "${acme_dns01_env_secret_arn}" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /opt/nullafi/acme-dns01.env
 
 # ---------- Write .env ----------
 cat > .env <<'ENVEOF'
@@ -27,30 +57,13 @@ SHIELD_IMAGE=${shield_image}
 SQUID_IMAGE=${squid_image}
 ELASTIC_IMAGE=${activity_image}
 REDIS_IMAGE=${redis_image}
-ELASTIC_PASSWORD=${elastic_password}
 PROXY_PORT=${proxy_port}
 RESTART_POLICY=unless-stopped
 NULLAFI_HTTPS_ENABLED=${has_domain ? "true" : "false"}
 ENVEOF
-
-# ---------- Write license key ----------
-%{ if has_license_key ~}
-cat > /opt/nullafi/license.key <<'LICEOF'
-${license_key}
-LICEOF
-%{ endif ~}
-
-# ---------- Write MITM certs ----------
-%{ if has_mitm_cert ~}
-cat > /opt/nullafi/mitm.crt <<'CERTEOF'
-${mitm_cert}
-CERTEOF
-
-cat > /opt/nullafi/mitm.key <<'KEYEOF'
-${mitm_key}
-KEYEOF
-chmod 600 /opt/nullafi/mitm.key
-%{ endif ~}
+printf 'ELASTIC_PASSWORD=%s\n' "$ELASTIC_PASSWORD" >> .env
+printf 'NULLAFI_LICENSE_KEY=%s\n' "$LICENSE_KEY" >> .env
+unset ELASTIC_PASSWORD LICENSE_KEY
 
 # ---------- Write docker-compose.yml ----------
 cat > docker-compose.yml <<'COMPOSEEOF'
@@ -87,6 +100,8 @@ services:
       - "443:443"
     volumes:
       - "certs:/apps/nullafi/user-data/certs"
+    env_file:
+      - /opt/nullafi/acme-dns01.env
     environment:
       NULLAFI_HTTP_CUSTOM_DOMAIN: "$${HOST_NAME}"
       NULLAFI_ACTIVITY_DATABASE_URL: "http://elastic:$${ELASTIC_PASSWORD}@activity:9200"
@@ -103,9 +118,6 @@ services:
       AWS_HOSTED_ZONE_ID: "${route53_zone_id}"
       AWS_REGION: "${region}"
 %{ endif ~}
-%{ for key, value in acme_dns01_env ~}
-      ${key}: "${value}"
-%{ endfor ~}
       NULLAFI_LICENSE_KEY_VALUE: "$${NULLAFI_LICENSE_KEY:-}"
 
   shield-icap:
@@ -200,13 +212,6 @@ services:
     volumes:
       - "redis:/data"
 COMPOSEEOF
-
-# ---------- Write license key env var for compose ----------
-%{ if has_license_key ~}
-echo "NULLAFI_LICENSE_KEY=$(cat /opt/nullafi/license.key)" >> .env
-%{ else ~}
-echo "NULLAFI_LICENSE_KEY=" >> .env
-%{ endif ~}
 
 # ---------- Wait for DNS to resolve to this instance's EIP ----------
 %{ if has_domain ~}

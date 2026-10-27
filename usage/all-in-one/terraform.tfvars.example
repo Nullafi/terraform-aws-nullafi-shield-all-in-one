@@ -5,10 +5,12 @@ host_name           = "shield.example.com"
 route53_zone_id     = "Z0000000000000EXAMPLE"
 acme_challenge_type = "DNS-01"
 
-nullafi_license_key = "PASTE-YOUR-LICENSE-KEY"
+# Set the license key outside this file: export TF_VAR_nullafi_license_key=...
+proxy_ca_cert_file = "./nullafi.crt"
+proxy_ca_key_file  = "./nullafi.key"
 
-proxy_mitm_cert = "./nullafi.crt"
-proxy_mitm_key  = "./nullafi.key"
+allowed_web_cidrs   = ["0.0.0.0/0"]
+allowed_proxy_cidrs = ["203.0.113.0/24"]
 
 key_name          = "my-ec2-keypair"
 allowed_ssh_cidrs = ["203.0.113.4/32"]
